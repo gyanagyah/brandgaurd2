@@ -175,18 +175,18 @@ def read_pdf_file(filepath):
     PyPDF2 library use karti hai — PDF ke har page se text extract karti hai.
     """
     try:
-        import PyPDF2
+        from pypdf import PdfReader  # pypdf is the modern successor to PyPDF2
         text = ""
         with open(filepath, "rb") as f:     # "rb" = read binary (PDF binary format mein hota)
-            reader = PyPDF2.PdfReader(f)
+            reader = PdfReader(f)
             for page in reader.pages:
                 page_text = page.extract_text()
                 if page_text:
                     text += page_text + "\n\n"
         return text
     except ImportError:
-        # Agar PyPDF2 installed nahi hai
-        print("⚠️ PyPDF2 not installed. PDF reading disabled.")
+        # Agar pypdf installed nahi hai
+        print("⚠️ pypdf not installed. PDF reading disabled.")
         return ""
 
 

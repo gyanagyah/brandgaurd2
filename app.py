@@ -25,7 +25,7 @@ st.set_page_config(
     page_title="BrandGuard — AI Brand Compliance",
     page_icon="🛡️",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
 # ─── LOGO HELPER ─────────────────────────────────────────────────────────────
@@ -329,9 +329,14 @@ st.markdown("""
     /* ── Spinner ── */
     .stSpinner > div { border-top-color: #2563eb !important; }
 
-    /* Hide Streamlit footer & menu ── */
+    /* Hide Streamlit footer, menu & deploy button — but NOT the sidebar toggle ── */
     #MainMenu, footer { visibility: hidden; }
-    header { visibility: hidden; }
+    /* Hide only the decorative parts of the header, not the sidebar toggle */
+    [data-testid="stToolbar"] { visibility: hidden; }
+    [data-testid="stStatusWidget"] { visibility: hidden; }
+    [data-testid="stDeployButton"] { display: none; }
+    /* Ensure sidebar collapse/expand control is always clickable */
+    [data-testid="collapsedControl"] { visibility: visible !important; display: flex !important; }
 
     /* ── FORCE LIGHT MODE TEXT & INPUT VISIBILITY ── */
     .main label, 
@@ -488,10 +493,13 @@ if "current_role" not in st.session_state:
 def splash_page():
     """Full-screen role-selection landing page shown on first load."""
 
-    # Hide sidebar on splash
+    # On splash, visually hide sidebar content but DON'T use display:none
+    # (display:none creates a persistent conflict; visibility:hidden is safer)
     st.markdown(
-        "<style>[data-testid='stSidebar']{display:none!important;}"
-        ".main .block-container{padding:0!important;max-width:100%!important;}</style>",
+        "<style>"
+        "[data-testid='stSidebar']{visibility:hidden!important;width:0!important;min-width:0!important;}"
+        ".main .block-container{padding:0!important;max-width:100%!important;}"
+        "</style>",
         unsafe_allow_html=True,
     )
 
@@ -557,6 +565,32 @@ def splash_page():
 if st.session_state.current_role is None:
     splash_page()
     st.stop()   # Nothing below runs until a role is picked
+
+# ── FORCE SIDEBAR OPEN ────────────────────────────────────────────────────
+# Override ALL mechanisms Streamlit uses to hide the sidebar:
+#   • display / visibility  (CSS hiding)
+#   • transform: translateX (JS-driven slide-out animation)
+#   • width / min-width / margin-left (collapsed-state sizing)
+st.markdown("""
+<style>
+    /* Force the sidebar to always be visible and open */
+    [data-testid="stSidebar"] {
+        display: flex !important;
+        visibility: visible !important;
+        transform: translateX(0px) !important;
+        width: 21rem !important;
+        min-width: 21rem !important;
+        margin-left: 0 !important;
+        position: relative !important;
+        flex-shrink: 0 !important;
+    }
+    /* Hide the collapse arrow button so users can't close it */
+    [data-testid="stSidebarCollapseButton"],
+    [data-testid="collapsedControl"],
+    button[aria-label="Close sidebar"],
+    button[kind="header"] { display: none !important; }
+</style>
+""", unsafe_allow_html=True)
 
 # ─── SIDEBAR ─────────────────────────────────────────────────────────────────
 with st.sidebar:
