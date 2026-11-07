@@ -129,6 +129,33 @@ def chunk_text(text, chunk_size=500, overlap=50):
     
     return chunks
 
+def read_pdf_file(filepath):
+    """
+    PDF file padhho aur text nikalo.
+    Pehle pypdf (jo requirements.txt mein hai) use karega, 
+    aur fallback ke liye PyPDF2 check karega.
+    """
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        try:
+            from PyPDF2 import PdfReader
+        except ImportError:
+            print("⚠️ Neither pypdf nor PyPDF2 is installed. PDF reading disabled.")
+            return ""
+
+    try:
+        text = ""
+        with open(filepath, "rb") as f:
+            reader = PdfReader(f)
+            for page in reader.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n\n"
+        return text
+    except Exception as e:
+        print(f"⚠️ Error reading PDF {filepath}: {e}")
+        return ""
 
 def read_text_file(filepath):
     """

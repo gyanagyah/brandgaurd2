@@ -1062,10 +1062,23 @@ def admin_page():
                 temp_path = os.path.join(temp_dir, uf.name)
                 with open(temp_path, "wb") as f:
                     f.write(uf.getbuffer())
+
+                fname_lower = uf.name.lower()
+                if "guideline" in fname_lower:
+                    detected_type = "guideline"
+                elif "fact" in fname_lower or "product" in fname_lower:
+                    detected_type = "factsheet"
+                elif "legal" in fname_lower or "regulatory" in fname_lower:
+                    detected_type = "legal"
+                elif "template" in fname_lower:
+                    detected_type = "template"
+                else:
+                    detected_type = doc_type
+
                 with st.spinner(f"Processing {uf.name}…"):
-                    res = ingest.ingest_document(temp_path, doc_type)
+                    res = ingest.ingest_document(temp_path, detected_type)
                 if res["status"] == "success":
-                    st.success(f"✅ {uf.name}: {res['chunk_count']} chunks ingested ({res['char_count']} chars)")
+                    st.success(f"✅ {uf.name} ({detected_type}): {res['chunk_count']} chunks ingested ({res['char_count']} chars)")
                 else:
                     st.error(f"❌ {uf.name}: {res.get('message', 'Error')}")
 
