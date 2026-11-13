@@ -29,6 +29,7 @@ import sqlite3          # Python ki built-in library — SQLite se baat karne ke
 import json             # Python objects ko JSON string mein convert karne ke liye
 import os               # File paths handle karne ke liye
 from datetime import datetime  # Current date/time nikalne ke liye
+import bcrypt           # Password hashing ke liye (Improvement 1)
 
 # Database file ka path — project root mein banega
 DB_PATH = os.path.join(os.path.dirname(__file__), "brandguard.db")
@@ -158,6 +159,19 @@ def init_db():
     """)
     # decision values: 'approved', 'rejected', 'revision_needed'
     
+    # ─────────────────────────────────────────────────────────
+    # TABLE 5: users — Real authentication (Improvement 1)
+    # ---------------------------------------------------------
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'creator',
+            created_at TEXT NOT NULL
+        )
+    """)
+
     conn.commit()   # Changes save karo (like Ctrl+S)
     conn.close()    # Connection band karo
     print("✅ Database initialized successfully!")
@@ -488,6 +502,145 @@ def get_dashboard_stats():
 
 
 # ─── INITIALIZATION ─────────────────────────────────────────────────────────
+
+
+# ─── USERS / AUTHENTICATION (Improvement 1) ──────────────────────────────
+
+def register_user(username, password, role="creator"):
+    """New user register karo with bcrypt hashed password."""
+    password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO users (username, password_hash, role, created_at) VALUES (?, ?, ?, ?)",
+            (username.strip(), password_hash, role, datetime.now().isoformat()),
+        )
+        conn.commit()
+        return {"status": "success"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        conn.close()
+
+
+def authenticate_user(username, password):
+    """Username + password verify karo. Returns user dict or None."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT * FROM users WHERE username = ?", (username.strip(),)
+    ).fetchone()
+    conn.close()
+    if row is None:
+        return None
+    user = dict(row)
+    if bcrypt.checkpw(password.encode("utf-8"), user["password_hash"].encode("utf-8")):
+        return user
+    return None
+
+
+def get_approved_submissions():
+    """All submissions that were approved by a human reviewer."""
+    conn = get_connection()
+    subs = conn.execute("""
+        SELECT s.*, e.overall_score, e.id as eval_id
+        FROM submissions s
+        LEFT JOIN evaluations e ON e.id = (
+            SELECT MAX(e2.id) FROM evaluations e2 WHERE e2.submission_id = s.id
+        )
+        WHERE s.status = 'approved'
+        ORDER BY s.created_at DESC
+    """).fetchall()
+    conn.close()
+    return [dict(s) for s in subs]
+
+
+def delete_all_submissions():
+    """Delete all submissions, evaluations, and reviews (clear history)."""
+    conn = get_connection()
+    conn.execute("DELETE FROM reviews")
+    conn.execute("DELETE FROM evaluations")
+    conn.execute("DELETE FROM submissions")
+    conn.commit()
+    conn.close()
+
+
+def get_submissions_by_creator(creator_name):
+    """Sirf ek specific creator ke submissions nikalo (Improvement 1 — own history only)."""
+    conn = get_connection()
+    subs = conn.execute(
+        "SELECT * FROM submissions WHERE creator_name = ? ORDER BY created_at DESC",
+        (creator_name,),
+    ).fetchall()
+    conn.close()
+    return [dict(s) for s in subs]
+
+
+# ─── ANALYTICS QUERIES (Improvement 3) ───────────────────────────────────
+
+def get_score_distribution():
+    """Score distribution for histogram (buckets of 10)."""
+    conn = get_connection()
+    rows = conn.execute("SELECT overall_score FROM evaluations ORDER BY overall_score").fetchall()
+    conn.close()
+    return [r[0] for r in rows]
+
+
+def get_category_averages():
+    """Average score per category for radar chart."""
+    conn = get_connection()
+    row = conn.execute("""
+        SELECT
+            AVG(factual_accuracy)       AS factual_accuracy,
+            AVG(regulatory_compliance)  AS regulatory_compliance,
+            AVG(brand_identity)         AS brand_identity,
+            AVG(visual_consistency)     AS visual_consistency,
+            AVG(campaign_effectiveness) AS campaign_effectiveness,
+            AVG(accessibility)          AS accessibility,
+            AVG(overall_design)         AS overall_design
+        FROM evaluations
+    """).fetchone()
+    conn.close()
+    if row:
+        return dict(row)
+    return {}
+
+
+def get_approval_trend():
+    """Daily approval trend — count of approved/rejected per day."""
+    conn = get_connection()
+    rows = conn.execute("""
+        SELECT DATE(reviewed_at) AS day, decision, COUNT(*) AS cnt
+        FROM reviews
+        GROUP BY day, decision
+        ORDER BY day
+    """).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_common_failure_categories():
+    """Most common failure categories (categories where avg score < 70)."""
+    conn = get_connection()
+    row = conn.execute("""
+        SELECT
+            AVG(factual_accuracy)       AS factual_accuracy,
+            AVG(regulatory_compliance)  AS regulatory_compliance,
+            AVG(brand_identity)         AS brand_identity,
+            AVG(visual_consistency)     AS visual_consistency,
+            AVG(campaign_effectiveness) AS campaign_effectiveness,
+            AVG(accessibility)          AS accessibility,
+            AVG(overall_design)         AS overall_design
+        FROM evaluations
+    """).fetchone()
+    conn.close()
+    if not row:
+        return []
+    data = dict(row)
+    failures = [(cat.replace("_", " ").title(), round(score or 0, 1))
+                for cat, score in data.items() if (score or 0) < 70]
+    failures.sort(key=lambda x: x[1])
+    return failures
+
 
 # Jab ye file import hogi, automatically database initialize ho jayega
 init_db()

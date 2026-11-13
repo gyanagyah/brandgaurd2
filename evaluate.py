@@ -1,86 +1,71 @@
 # ============================================================================
-# evaluate.py — AI Evaluation Engine (Gemini API + RAG + Scoring)
-# ============================================================================
-# YEH FILE KYA KARTI HAI?
-# -----------------------
-# Ye BrandGuard ka CORE ENGINE hai — ye file sab ko connect karti hai:
-#   1. retrive.py se relevant guidelines laati hai (RAG)
-#   2. Gemini API ko prompt bhejti hai (text + image + guidelines)
-#   3. Gemini se structured scores aur feedback maangti hai
-#   4. scoring.py se final weighted score calculate karti hai
-#   5. db.py mein results save karti hai
-#
-# GEMINI API KYA HAI? (Detailed)
-# ──────────────────────────────
-# Google ka AI model jo text AUR images dono samajhta hai.
-# Hum isko:
-#   - Post ka text bhejte hain
-#   - Post ki image bhejte hain (optional)
-#   - Brand guidelines bhejte hain (RAG se)
-#   - Campaign objective batate hain
-#   - Structured response maangte hain (JSON format mein scores + feedback)
-#
-# PROMPT ENGINEERING KYA HAI?
-# ───────────────────────────
-# AI se sahi answer lene ke liye sahi tarike se poochna.
-# Jaise ek doctor se sirf "mujhe dard hai" bolne se kuch nahi hoga,
-# par "mere left shoulder mein 3 din se dard hai, uthane mein problem hai"
-# bolne se specific answer milega.
-# Waise hi AI ko specific instructions dene se better output milta hai.
-#
-# STRUCTURED OUTPUT KYA HAI?
-# ──────────────────────────
-# AI se kahna ki "answer JSON format mein do" — taaki hum programmatically
-# parse kar sakein. Nahi toh AI free text dega jo parse karna mushkil hai.
+# evaluate.py — AI Evaluation Engine (Groq API + RAG + Scoring)
 # ============================================================================
 
 import os
 import json
-import base64                   # Images ko base64 encode karne ke liye
-from dotenv import load_dotenv  # .env file se API key load karne ke liye
-from google import genai        # Google Gemini AI SDK
-from google.genai import types  # Gemini response types
+import base64
+import time
+import re
+from dotenv import load_dotenv
+from groq import Groq
 
-import retrive                  # Hamari retrive.py (RAG retrieval)
-import scoring                  # Hamari scoring.py (weighted scoring)
-import db                       # Hamari db.py (database)
+import retrive
+import scoring
+import db
 
-# ─── GEMINI API SETUP ───────────────────────────────────────────────────────
-import streamlit as st
-
-# 1. Local development ke liye data/.env file load karo
+# ─── GROQ API SETUP ─────────────────────────────────────────────────────────
 load_dotenv(os.path.join(os.path.dirname(__file__), "data", ".env"))
+load_dotenv()
 
-# 2. Pehle local environment (.env) se key check karo
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# 3. Agar .env mein nahi mili (jaise Streamlit Cloud par), toh st.secrets se lo
-if not GEMINI_API_KEY:
+if not GROQ_API_KEY:
     try:
-        GEMINI_API_KEY = st.secrets["GEMINI_API_KEY"]
+        import streamlit as st
+        GROQ_API_KEY = st.secrets.get("GROQ_API_KEY")
     except Exception:
         pass
 
-if not GEMINI_API_KEY:
-    print("❌ GEMINI_API_KEY not found! Check data/.env or Streamlit Secrets.")
+if not GROQ_API_KEY:
+    print("WARNING: GROQ_API_KEY not found! Check data/.env or Streamlit Secrets.")
 
-import os
-import streamlit as st
-from dotenv import load_dotenv
-from google import genai
+# Initialize Groq client
+client = Groq(api_key=GROQ_API_KEY)
 
-load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY")
-client = genai.Client(api_key=GEMINI_API_KEY)
+def _get_available_groq_models(needs_vision=False):
+    """Fetch active models directly from your Groq account."""
+    try:
+        models_resp = client.models.list()
+        available_ids = [
+            m.id for m in models_resp.data
+            if "whisper" not in m.id.lower()
+            and "guard" not in m.id.lower()
+            and "tts" not in m.id.lower()
+            and "embed" not in m.id.lower()
+        ]
+        if needs_vision:
+            vision = [m for m in available_ids if "vision" in m.id.lower() or "llama-4" in m.id.lower()]
+            return vision if vision else available_ids
 
-# Gemini client initialize karo
-client = genai.Client(api_key=GEMINI_API_KEY)
+        # Prioritize larger general-purpose chat models first
+        preferred = sorted(
+            available_ids,
+            key=lambda x: (
+                0 if "70b" in x.lower() else
+                1 if "llama-4" in x.lower() else
+                2 if "qwen" in x.lower() or "deepseek" in x.lower() or "gpt" in x.lower() else
+                3
+            )
+        )
+        return preferred
+    except Exception as e:
+        print(f"   WARNING: Could not list Groq models ({e}), using fallback list.")
+        return ["llama-3.3-70b-versatile", "meta-llama/llama-4-scout-17b-16e-instruct"]
 
 
 # ─── EVALUATION PROMPT ──────────────────────────────────────────────────────
-# Ye prompt AI ko batata hai ki kya karna hai aur kaise karna hai.
-# Prompt engineering ka ye core part hai — jitna specific prompt, utna accha output.
 
 EVALUATION_PROMPT_TEMPLATE = """
 You are BrandGuard, an expert AI brand compliance reviewer. Your job is to evaluate 
@@ -129,7 +114,7 @@ Flag any of these as critical issues (these will OVERRIDE the score, even if hig
 - Offensive or discriminatory content
 
 ## RESPONSE FORMAT:
-You MUST respond in this exact JSON format (no other text, just JSON):
+You MUST respond in this exact JSON format (no markdown, no extra text, just valid JSON):
 {{
     "scores": {{
         "factual_accuracy": <0-100>,
@@ -141,8 +126,7 @@ You MUST respond in this exact JSON format (no other text, just JSON):
         "overall_design": <0-100>
     }},
     "critical_flags": [
-        "<critical issue 1 if any>",
-        "<critical issue 2 if any>"
+        "<critical issue 1 if any>"
     ],
     "category_feedback": {{
         "factual_accuracy": "<detailed feedback for this category>",
@@ -166,132 +150,157 @@ You MUST respond in this exact JSON format (no other text, just JSON):
 """
 
 
-# ─── MAIN EVALUATION FUNCTION ───────────────────────────────────────────────
+def _parse_json_response(raw_response):
+    """Extract JSON from AI response with fallback strategies."""
+    text = raw_response.strip()
 
-def evaluate_post(text_content, campaign_objective, image_path=None, 
-                  submission_id=None):
-    """
-    MAIN FUNCTION — Post ko evaluate karo aur scores + feedback do.
-    
-    YE FUNCTION POORA PIPELINE CHALATA HAI:
-    1. RAG: relevant guidelines retrieve karo
-    2. PROMPT: guidelines + post content ko ek prompt mein combine karo
-    3. GEMINI: AI se evaluation maango
-    4. SCORING: weighted score calculate karo + critical checks
-    5. DB: results save karo
-    
-    PARAMETERS:
-        text_content: str — post ka text
-        campaign_objective: str — post ka goal (brand_awareness, lead_gen, etc.)
-        image_path: str (optional) — post ki image ka path
-        submission_id: int (optional) — agar DB mein submission already hai
-    
-    RETURNS:
-        dict — complete evaluation result
-    """
-    print(f"\n🔍 Starting evaluation...")
-    print(f"   📝 Text: {text_content[:100]}...")
-    print(f"   🎯 Objective: {campaign_objective}")
-    
-    # ─── STEP 1: RAG — Relevant guidelines retrieve karo ─────────────────
-    print("   📚 Step 1: Retrieving relevant guidelines...")
-    
-    guidelines_text, raw_guidelines = retrive.retrieve_and_format(
-        query_text=text_content,
-        n_results=5
-    )
-    # guidelines_text = formatted string of relevant chunks
-    # raw_guidelines = list of raw chunk objects
-    
-    guideline_sources = [g["source"] for g in raw_guidelines]
-    print(f"   📚 Found {len(raw_guidelines)} relevant guideline chunks from: "
-          f"{', '.join(set(guideline_sources)) if guideline_sources else 'none'}")
-    
-    # ─── STEP 2: PROMPT — Sab info combine karo ──────────────────────────
-    print("   ✏️ Step 2: Building evaluation prompt...")
-    
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    if "```" in text:
+        match = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", text)
+        if match:
+            try:
+                return json.loads(match.group(1))
+            except json.JSONDecodeError:
+                pass
+
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start != -1 and end > start:
+        try:
+            return json.loads(text[start:end])
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
+def _encode_image_to_data_url(image_path):
+    """Encode local image file to base64 data URI for Groq Vision models."""
+    with open(image_path, "rb") as img_file:
+        b64_data = base64.b64encode(img_file.read()).decode("utf-8")
+
+    ext = image_path.lower().rsplit(".", 1)[-1]
+    mime_map = {
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "png": "image/png",
+        "gif": "image/gif",
+        "webp": "image/webp",
+    }
+    mime_type = mime_map.get(ext, "image/jpeg")
+    return f"data:{mime_type};base64,{b64_data}"
+
+
+def evaluate_post(text_content, campaign_objective, image_path=None,
+                  submission_id=None, max_retries=3):
+    """Evaluate post using Groq API + RAG + Scoring Engine."""
+    print("\nStarting evaluation with Groq...")
+    print(f"   Text: {str(text_content)[:100]}...")
+    print(f"   Objective: {campaign_objective}")
+
+    # ── STEP 1: RAG — Retrieve relevant guidelines ───────────────────────────
+    print("   Step 1: Retrieving relevant guidelines...")
+    try:
+        guidelines_text, raw_guidelines = retrive.retrieve_and_format(
+            query_text=text_content or campaign_objective,
+            n_results=5
+        )
+        guideline_sources = [g["source"] for g in raw_guidelines]
+        print(f"   Found {len(raw_guidelines)} relevant guideline chunks")
+    except Exception as e:
+        print(f"   WARNING: RAG retrieval failed: {e}")
+        guidelines_text = "No guidelines retrieved — evaluate based on general brand standards."
+        raw_guidelines = []
+        guideline_sources = []
+
+    # ── STEP 2: Build Prompt & Message Payload ───────────────────────────────
+    print("   Step 2: Building evaluation prompt...")
     prompt = EVALUATION_PROMPT_TEMPLATE.format(
         guidelines=guidelines_text,
         objective=campaign_objective,
         post_text=text_content if text_content else "(No text content provided)"
     )
-    # .format() → template mein {placeholders} ko actual values se replace karo
-    
-    # ─── STEP 3: GEMINI API CALL ─────────────────────────────────────────
-    print("   🤖 Step 3: Calling Gemini AI for evaluation...")
-    
-    try:
-        # Content parts banao (text + optional image)
-        contents = [prompt]
-        
-        # Agar image hai toh use bhi bhejo
-        if image_path and os.path.exists(image_path):
-            print(f"   🖼️ Including image: {image_path}")
-            # Image ko base64 encode karo
-            # Base64 = binary data ko text mein convert karna (AI API ko bhejne ke liye)
-            with open(image_path, "rb") as img_file:
-                image_bytes = img_file.read()
-            
-            # Image ka MIME type detect karo
-            mime_type = "image/jpeg"  # Default
-            if image_path.lower().endswith(".png"):
-                mime_type = "image/png"
-            elif image_path.lower().endswith(".gif"):
-                mime_type = "image/gif"
-            elif image_path.lower().endswith(".webp"):
-                mime_type = "image/webp"
-            
-            # Gemini ko image part bhejo
-            image_part = types.Part.from_bytes(
-                data=image_bytes,
-                mime_type=mime_type,
-            )
-            contents = [prompt, image_part]
-        
-        # Gemini API call karo
-        response = client.models.generate_content(
-            model="gemini-3.6-flash",   # Fast aur capable model
-            contents=contents,
-            config=types.GenerateContentConfig(
-                temperature=0.2,         # Low temperature = more consistent/factual output
-                # Temperature: 0.0 = very deterministic, 1.0 = very creative
-                # Evaluation ke liye low temperature chahiye kyunki hum consistent scores chahte
-            ),
-        )
-        
-        raw_response = response.text
-        print(f"   ✅ Gemini response received ({len(raw_response)} chars)")
-        
-    except Exception as e:
-        print(f"   ❌ Gemini API error: {e}")
+
+    has_image = bool(image_path and os.path.exists(image_path))
+    models_to_try = _get_available_groq_models(needs_vision=has_image)
+    print(f"   Available models to try: {models_to_try}")
+
+    if has_image:
+        print(f"   Including image: {image_path}")
+        data_url = _encode_image_to_data_url(image_path)
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": data_url}},
+                ],
+            }
+        ]
+    else:
+        messages = [{"role": "user", "content": prompt}]
+
+    # ── STEP 3: GROQ API CALL (with retry & fallback) ────────────────────────
+    print("   Step 3: Calling Groq AI for evaluation...")
+
+    raw_response = None
+    last_error = None
+
+    for model in models_to_try:
+        print(f"   Trying model: {model}...")
+        for attempt in range(1, max_retries + 1):
+            try:
+                chat_completion = client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=0.1,
+                    max_tokens=4096,
+                )
+
+                raw_response = chat_completion.choices[0].message.content
+                print(f"   Success with {model} ({len(raw_response)} chars)")
+                break
+
+            except Exception as e:
+                last_error = str(e)
+                err_str = str(e)
+                if "429" in err_str or "503" in err_str or "rate_limit" in err_str.lower():
+                    print(f"   {model} rate-limited/overloaded (attempt {attempt}/{max_retries})")
+                    if attempt < max_retries:
+                        wait_time = 3 * attempt
+                        print(f"   Waiting {wait_time}s before retry...")
+                        time.sleep(wait_time)
+                elif "404" in err_str or "model_not_found" in err_str.lower():
+                    print(f"   {model} not available — skipping to next model...")
+                    break
+                else:
+                    print(f"   Attempt {attempt}/{max_retries} failed: {e}")
+                    if attempt < max_retries:
+                        time.sleep(2 ** attempt)
+
+        if raw_response:
+            break
+
+    if raw_response is None:
         return {
             "status": "error",
-            "message": f"AI evaluation failed: {str(e)}",
+            "message": (
+                "⚠️ Groq API call failed across available models. "
+                "Check your GROQ_API_KEY or rate limits and try again. "
+                f"(Last error: {last_error})"
+            ),
         }
-    
-    # ─── STEP 4: RESPONSE PARSE KARO ─────────────────────────────────────
-    print("   📊 Step 4: Parsing AI response...")
-    
-    try:
-        # JSON response ko parse karo
-        # Kabhi kabhi AI extra text add kar deta hai JSON ke around
-        # Isliye pehle JSON part dhundhte hain
-        json_str = raw_response.strip()
-        
-        # Agar response ```json ... ``` mein wrapped hai toh unwrap karo
-        if json_str.startswith("```"):
-            json_str = json_str.split("```")[1]
-            if json_str.startswith("json"):
-                json_str = json_str[4:]
-        json_str = json_str.strip()
-        
-        ai_result = json.loads(json_str)
-        # json.loads() → JSON string ko Python dict mein convert karo
-        
-    except json.JSONDecodeError as e:
-        print(f"   ⚠️ JSON parse error: {e}")
-        print(f"   Raw response: {raw_response[:500]}")
-        # Fallback: default scores use karo
+
+    # ── STEP 4: Parse JSON Response ──────────────────────────────────────────
+    print("   Step 4: Parsing AI response...")
+    ai_result = _parse_json_response(raw_response)
+
+    if ai_result is None:
+        print(f"   WARNING: JSON parse failed. Raw: {raw_response[:300]}")
         ai_result = {
             "scores": {
                 "factual_accuracy": 50, "regulatory_compliance": 50,
@@ -300,74 +309,75 @@ def evaluate_post(text_content, campaign_objective, image_path=None,
                 "overall_design": 50
             },
             "critical_flags": [],
-            "category_feedback": {},
+            "category_feedback": {
+                "factual_accuracy": "Could not parse AI response properly.",
+                "regulatory_compliance": "Could not parse AI response properly.",
+                "brand_identity": "Could not parse AI response properly.",
+                "visual_consistency": "Could not parse AI response properly.",
+                "campaign_effectiveness": "Could not parse AI response properly.",
+                "accessibility": "Could not parse AI response properly.",
+                "overall_design": "Could not parse AI response properly.",
+            },
             "suggestions": [],
-            "overall_summary": f"Evaluation parsing failed. Raw response: {raw_response[:200]}"
+            "overall_summary": f"Evaluation parsing failed. Raw response preview: {raw_response[:200]}"
         }
-    
-    # ─── STEP 5: SCORING — Weighted score calculate karo ─────────────────
-    print("   📈 Step 5: Calculating weighted scores...")
-    
+
+    # ── STEP 5: Calculate Weighted Scores ────────────────────────────────────
+    print("   Step 5: Calculating weighted scores...")
     category_scores = ai_result.get("scores", {})
-    critical_flags = ai_result.get("critical_flags", [])
-    # Khali strings filter karo critical flags se
-    critical_flags = [f for f in critical_flags if f and f.strip()]
-    
-    # Overall feedback text combine karo (for critical keyword detection)
+    critical_flags = [
+        f for f in ai_result.get("critical_flags", []) if f and str(f).strip()
+    ]
+
     feedback_text = ai_result.get("overall_summary", "")
     for cat, fb in ai_result.get("category_feedback", {}).items():
-        feedback_text += " " + fb
-    
-    # Scoring engine se final result lo
+        feedback_text += " " + str(fb)
+
     final_result = scoring.generate_final_result(
         category_scores=category_scores,
         feedback_text=feedback_text,
         critical_flags_from_ai=critical_flags,
     )
-    
-    # AI ke extra data bhi add karo result mein
+
     final_result["category_feedback"] = ai_result.get("category_feedback", {})
     final_result["suggestions"] = ai_result.get("suggestions", [])
     final_result["overall_summary"] = ai_result.get("overall_summary", "")
     final_result["guideline_sources"] = guideline_sources
     final_result["status"] = "success"
-    
-    print(f"   🎯 Overall Score: {final_result['overall_score']}/100")
-    print(f"   📋 Decision: {final_result['decision']}")
-    
-    # ─── STEP 6: DB MEIN SAVE KARO ──────────────────────────────────────
+
+    print(f"   Overall Score: {final_result['overall_score']}/100")
+    print(f"   Decision: {final_result['decision']}")
+
+    # ── STEP 6: Save to Database ─────────────────────────────────────────────
     if submission_id:
-        print(f"   💾 Step 6: Saving results to database...")
-        eval_id = db.save_evaluation(
-            submission_id=submission_id,
-            scores={
-                "overall_score": final_result["overall_score"],
-                **category_scores,  # ** = dict unpack (merge all key-values)
-            },
-            critical_flags=final_result["critical_flags"],
-            feedback={
-                "category_feedback": final_result["category_feedback"],
-                "overall_summary": final_result["overall_summary"],
-            },
-            suggestions=final_result["suggestions"],
-            has_critical=final_result["has_critical_issues"],
-        )
-        final_result["evaluation_id"] = eval_id
-        print(f"   ✅ Saved as evaluation ID: {eval_id}")
-    
-    # Score report print karo
-    print(scoring.format_score_report(final_result))
-    
+        print("   Step 6: Saving results to database...")
+        try:
+            eval_id = db.save_evaluation(
+                submission_id=submission_id,
+                scores={
+                    "overall_score": final_result["overall_score"],
+                    **category_scores,
+                },
+                critical_flags=final_result["critical_flags"],
+                feedback={
+                    "category_feedback": final_result["category_feedback"],
+                    "overall_summary": final_result["overall_summary"],
+                },
+                suggestions=final_result["suggestions"],
+                has_critical=final_result["has_critical_issues"],
+            )
+            final_result["evaluation_id"] = eval_id
+            print(f"   Saved as evaluation ID: {eval_id}")
+        except Exception as e:
+            print(f"   WARNING: Could not save to DB: {e}")
+
     return final_result
 
 
 def quick_evaluate(text, objective="brand_awareness"):
-    """
-    Quick evaluation — bina DB save kiye sirf scores aur feedback lo.
-    Testing aur debugging ke liye useful hai.
-    """
+    """Quick evaluation without saving to DB."""
     return evaluate_post(
         text_content=text,
         campaign_objective=objective,
-        submission_id=None,  # DB mein save nahi hoga
+        submission_id=None,
     )

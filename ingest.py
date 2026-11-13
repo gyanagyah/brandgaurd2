@@ -345,6 +345,27 @@ def get_collection_stats():
     }
 
 
+def delete_chunks_by_filename(filename):
+    """
+    ChromaDB se ek specific document ke saare chunks delete karo.
+    'filename' metadata field se match karke delete karta hai.
+    """
+    try:
+        # ChromaDB where clause: filename field match karo
+        results = collection.get(where={"filename": filename})
+        ids_to_delete = results.get("ids", [])
+        if ids_to_delete:
+            collection.delete(ids=ids_to_delete)
+            print(f"🗑️ Deleted {len(ids_to_delete)} chunks for '{filename}' from ChromaDB")
+            return len(ids_to_delete)
+        else:
+            print(f"ℹ️ No ChromaDB chunks found for filename '{filename}'")
+            return 0
+    except Exception as e:
+        print(f"⚠️ Could not delete chunks for '{filename}': {e}")
+        return 0
+
+
 def clear_collection():
     """
     Poora knowledge base clear karo (⚠️ DANGER — sab data delete ho jayega).

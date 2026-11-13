@@ -13,6 +13,7 @@ import streamlit as st
 import os
 import json
 import base64
+import difflib
 from datetime import datetime
 
 import db
@@ -359,7 +360,7 @@ st.markdown("""
         -webkit-text-fill-color: #1e293b !important;
     }
 
-    /* Sidebar ke 'Switch Role' button ka text Dark rakho */
+    /* Sidebar Logout button ka text Dark rakho */
     [data-testid="stSidebar"] .stButton > button,
     [data-testid="stSidebar"] .stButton > button p,
     [data-testid="stSidebar"] .stButton > button span {
@@ -471,23 +472,73 @@ ROLES = {
         "pages": ["⚙️ Admin — Knowledge Base"],
         "color": "#ec4899",
     },
-    "superadmin": {
-        "label": "Super Admin",
-        "emoji": "👑",
-        "desc": "Full access to all modules\nand the analytics dashboard.",
-        "pages": [
-            "🎨 Creator — Submit Content",
-            "✅ Reviewer — Approve Posts",
-            "⚙️ Admin — Knowledge Base",
-            "📊 Dashboard",
-        ],
-        "color": "#f59e0b",
-    },
 }
 
 # ─── SESSION STATE INIT ───────────────────────────────────────────────────────
 if "current_role" not in st.session_state:
     st.session_state.current_role = None   # None → show splash
+if "logged_in" not in st.session_state:
+    st.session_state.logged_in = False
+if "auth_user" not in st.session_state:
+    st.session_state.auth_user = None  # dict with username, role
+
+# ─── IMPROVEMENT 1: REAL AUTH LOGIN PAGE ─────────────────────────────────────
+def login_page():
+    """Login / Register screen shown before anything else."""
+    st.markdown(
+        "<style>"
+        "[data-testid='stSidebar']{visibility:hidden!important;width:0!important;min-width:0!important;}"
+        ".main .block-container{padding:1rem 2rem!important;max-width:520px!important;margin:0 auto!important;}"
+        "</style>",
+        unsafe_allow_html=True,
+    )
+    logo_html = ""
+    if LOGO_B64:
+        logo_html = f'<img src="data:image/jpeg;base64,{LOGO_B64}" style="width:80px;border-radius:14px;margin-bottom:1rem;"/>'
+    else:
+        logo_html = '<div style="font-size:3.5rem;margin-bottom:1rem;">🛡️</div>'
+    st.markdown(
+        f'<div style="text-align:center;padding-top:3rem;">{logo_html}'
+        f'<h2 style="color:#1a2f6e;font-weight:800;margin:0;">BrandGuard</h2>'
+        f'<p style="color:#64748b;font-size:0.9rem;margin-bottom:2rem;">AI Brand Compliance · Please sign in</p>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+    auth_tab, reg_tab = st.tabs(["🔑 Sign In", "📝 Register"])
+    with auth_tab:
+        with st.form("login_form"):
+            uname = st.text_input("Username")
+            pw = st.text_input("Password", type="password")
+            if st.form_submit_button("Sign In", type="primary", use_container_width=True):
+                user = db.authenticate_user(uname, pw)
+                if user:
+                    st.session_state.logged_in = True
+                    st.session_state.auth_user = user
+                    # Map db role → app role
+                    role_map = {"creator": "creator", "reviewer": "reviewer",
+                                "admin": "admin"}
+                    st.session_state.current_role = role_map.get(user["role"], "creator")
+                    st.rerun()
+                else:
+                    st.error("❌ Invalid username or password.")
+    with reg_tab:
+        with st.form("register_form"):
+            new_uname = st.text_input("Choose a Username")
+            new_pw = st.text_input("Choose a Password", type="password")
+            new_pw2 = st.text_input("Confirm Password", type="password")
+            new_role = st.selectbox("Role", ["creator", "reviewer", "admin"],
+                                    format_func=lambda x: x.replace("_"," ").title())
+            if st.form_submit_button("Register", type="primary", use_container_width=True):
+                if not new_uname.strip() or not new_pw.strip():
+                    st.error("Username and password are required.")
+                elif new_pw != new_pw2:
+                    st.error("❌ Passwords do not match.")
+                else:
+                    res = db.register_user(new_uname.strip(), new_pw, new_role)
+                    if res["status"] == "success":
+                        st.success("✅ Account created! You can now sign in.")
+                    else:
+                        st.error(f"❌ {res.get('message', 'Registration failed')}")
 
 # ─── SPLASH PAGE ─────────────────────────────────────────────────────────────
 def splash_page():
@@ -560,6 +611,11 @@ def splash_page():
         '<p class="splash-footer">BrandGuard © 2026 · AI Brand Compliance Platform</p>',
         unsafe_allow_html=True,
     )
+
+# ── Show login if not authenticated (Improvement 1) ─────────────────────────
+if not st.session_state.logged_in:
+    login_page()
+    st.stop()
 
 # ── Show splash if no role chosen yet ────────────────────────────────────────
 if st.session_state.current_role is None:
@@ -635,8 +691,10 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
-    # Switch Role button → back to splash
-    if st.button("🔄 Switch Role", use_container_width=True):
+    # Logout button — no Switch Role, role is locked to account
+    if st.button("🚪 Logout", use_container_width=True):
+        st.session_state.logged_in = False
+        st.session_state.auth_user = None
         st.session_state.current_role = None
         st.rerun()
 
@@ -736,6 +794,39 @@ def pill_for_status(status):
     return f'<span class="pill {cls}">{label}</span>'
 
 
+# ─── IMPROVEMENT 2: Diff Renderer Helper ────────────────────────────────────
+def _render_diff(original: str, revised: str):
+    """Render a side-by-side HTML diff of two texts."""
+    orig_lines = original.splitlines(keepends=True)
+    rev_lines = revised.splitlines(keepends=True)
+    diff = list(difflib.unified_diff(orig_lines, rev_lines, lineterm="", n=100))
+    if not diff:
+        st.info("No text changes detected.")
+        return
+    left_lines, right_lines = [], []
+    for line in diff[2:]:
+        if line.startswith("-"):
+            left_lines.append(f'<div style="background:#fee2e2;padding:2px 6px;border-radius:4px;margin:1px 0;white-space:pre-wrap;">'
+                              f'<span style="color:#991b1b;">{line[1:].rstrip()}</span></div>')
+            right_lines.append('<div style="padding:2px 6px;margin:1px 0;">&nbsp;</div>')
+        elif line.startswith("+"):
+            left_lines.append('<div style="padding:2px 6px;margin:1px 0;">&nbsp;</div>')
+            right_lines.append(f'<div style="background:#d1fae5;padding:2px 6px;border-radius:4px;margin:1px 0;white-space:pre-wrap;">'
+                               f'<span style="color:#065f46;">{line[1:].rstrip()}</span></div>')
+        elif not line.startswith("@"):
+            ctx = f'<div style="padding:2px 6px;margin:1px 0;white-space:pre-wrap;">'\
+                  f'<span style="color:#64748b;">{line.rstrip()}</span></div>'
+            left_lines.append(ctx)
+            right_lines.append(ctx)
+    dc1, dc2 = st.columns(2)
+    with dc1:
+        st.markdown("**📄 Original**")
+        st.markdown("".join(left_lines), unsafe_allow_html=True)
+    with dc2:
+        st.markdown("**✏️ Revised**")
+        st.markdown("".join(right_lines), unsafe_allow_html=True)
+
+
 # ============================================================================
 # 🎨 CREATOR PAGE
 # ============================================================================
@@ -756,9 +847,14 @@ def creator_page():
             col1, col2 = st.columns([2, 1])
 
             with col1:
+                _default_name = (
+                    st.session_state.auth_user["username"]
+                    if st.session_state.get("auth_user")
+                    else "Creator"
+                )
                 creator_name = st.text_input(
                     "Your Name",
-                    value="Creator",
+                    value=_default_name,
                     placeholder="Enter your name",
                 )
                 post_text = st.text_area(
@@ -825,6 +921,15 @@ def creator_page():
             if result.get("status") == "error":
                 st.error(f"❌ Evaluation failed: {result.get('message', 'Unknown error')}")
                 return
+
+            # ── Persist result in session_state so reruns don't lose it ──
+            st.session_state["last_submission_id"] = submission_id
+            st.session_state["last_result"] = result
+            st.session_state["last_post_text"] = post_text
+            st.session_state["last_creator_name"] = creator_name
+            st.session_state["last_image_path"] = image_path
+            st.session_state["last_campaign_objective"] = campaign_objective
+            st.session_state["review_sent"] = False
 
             # ── Results ────────────────────────────────────────────────────
             st.markdown("---")
@@ -926,13 +1031,137 @@ def creator_page():
                 st.markdown("---")
                 st.info(f"📝 **Summary:** {summary}")
 
-            # Send for review
+            # Send for review — stored in session_state so button survives rerun
             if result["can_send_for_review"]:
                 st.markdown("---")
-                if st.button("📤 Send for Human Review", type="primary", use_container_width=True):
-                    db.update_submission_status(submission_id, "sent_for_review")
+                if st.session_state.get("review_sent"):
+                    st.success("✅ Post already sent for human review! A reviewer will check it soon.")
+                else:
+                    if st.button("📤 Send for Human Review", type="primary", use_container_width=True,
+                                 key="send_review_btn"):
+                        db.update_submission_status(submission_id, "sent_for_review")
+                        st.session_state["review_sent"] = True
+                        st.success("✅ Post sent for human review! A reviewer will check it soon.")
+                        st.balloons()
+                        st.rerun()
+
+            # (Edit & Resubmit panel rendered below via session_state — survives rerun)
+
+    # ── Persistent results panel (shown after rerun from Send for Review) ──
+    if not submitted and st.session_state.get("last_result"):
+        _result = st.session_state["last_result"]
+        _sub_id = st.session_state["last_submission_id"]
+        _post_text = st.session_state["last_post_text"]
+        _creator_name = st.session_state["last_creator_name"]
+        _image_path = st.session_state["last_image_path"]
+        _campaign_obj = st.session_state["last_campaign_objective"]
+        _decision = _result["decision"]
+        _overall = _result["overall_score"]
+        _sc = score_class(_overall)
+
+        st.markdown("---")
+        if _decision == "pass":
+            st.success(f"✅ {_result['decision_reason']}")
+        elif _decision == "needs_improvement":
+            st.warning(f"⚠️ {_result['decision_reason']}")
+        else:
+            st.error(f"❌ {_result['decision_reason']}")
+
+        g1, g2, g3 = st.columns(3)
+        with g1:
+            st.markdown(
+                f'<div class="score-gauge">'
+                f'<div style="color:#64748b;font-size:0.82rem;font-weight:600;'
+                f'letter-spacing:0.5px;text-transform:uppercase;margin-bottom:0.5rem;">'
+                f'Overall Score</div>'
+                f'<div class="score-number {_sc}">{_overall}</div>'
+                f'<div style="color:#94a3b8;font-size:0.85rem;">/100</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        with g2:
+            st.metric("🚨 Critical Issues", len(_result["critical_flags"]))
+        with g3:
+            st.metric(
+                "📤 Ready for Review",
+                "Yes ✅" if _result["can_send_for_review"] else "No ❌",
+            )
+
+        # Send for review persistent panel
+        if _result["can_send_for_review"]:
+            st.markdown("---")
+            if st.session_state.get("review_sent"):
+                st.success("✅ Post already sent for human review! A reviewer will check it soon.")
+            else:
+                if st.button("📤 Send for Human Review", type="primary",
+                             use_container_width=True, key="send_review_btn_persistent"):
+                    db.update_submission_status(_sub_id, "sent_for_review")
+                    st.session_state["review_sent"] = True
                     st.success("✅ Post sent for human review! A reviewer will check it soon.")
                     st.balloons()
+                    st.rerun()
+
+        # Edit & Resubmit persistent panel
+        st.markdown("---")
+        st.markdown("### ✏️ Edit & Resubmit")
+        st.caption("Make changes to your post and re-evaluate. A diff and score trend will be shown.")
+        with st.form("resubmit_form_persistent"):
+            revised_text_p = st.text_area(
+                "Revised Post Text",
+                value=_post_text or "",
+                height=180,
+            )
+            do_resubmit_p = st.form_submit_button("🔁 Resubmit & Re-evaluate",
+                                                   type="primary", use_container_width=True)
+        if do_resubmit_p:
+            if not revised_text_p.strip():
+                st.error("Please enter revised text.")
+            else:
+                st.markdown("#### 🔀 Side-by-Side Diff (Original vs Revised)")
+                _render_diff(_post_text or "", revised_text_p)
+                new_sub_id = db.create_submission(
+                    creator_name=_creator_name,
+                    text_content=revised_text_p,
+                    image_path=_image_path,
+                    campaign_objective=_campaign_obj,
+                    parent_id=_sub_id,
+                )
+                with st.spinner("🤖 Re-evaluating revised content…"):
+                    new_result_p = evaluate.evaluate_post(
+                        text_content=revised_text_p,
+                        campaign_objective=_campaign_obj,
+                        image_path=_image_path,
+                        submission_id=new_sub_id,
+                    )
+                new_score_p = new_result_p.get("overall_score", 0)
+                score_delta_p = new_score_p - _overall
+                st.markdown("#### 📈 Score Trend")
+                tc1, tc2, tc3 = st.columns(3)
+                with tc1: st.metric("Original Score", f"{_overall}/100")
+                with tc2: st.metric("New Score", f"{new_score_p}/100", delta=f"{score_delta_p:+.1f}")
+                with tc3:
+                    old_flags_p = set(_result.get("critical_flags", []))
+                    new_flags_p = set(new_result_p.get("critical_flags", []))
+                    fixed_p = old_flags_p - new_flags_p
+                    still_open_p = old_flags_p & new_flags_p
+                    st.metric("Issues Fixed", f"{len(fixed_p)} / {len(old_flags_p)}",
+                              delta=f"+{len(fixed_p)} fixed" if fixed_p else "none fixed")
+                if fixed_p:
+                    st.success("✅ **Issues Fixed:** " + ", ".join(fixed_p))
+                if still_open_p:
+                    st.warning("⚠️ **Still Open:** " + ", ".join(still_open_p))
+                # Update session state to new result
+                st.session_state["last_result"] = new_result_p
+                st.session_state["last_submission_id"] = new_sub_id
+                st.session_state["last_post_text"] = revised_text_p
+                st.session_state["review_sent"] = False
+                new_dec = new_result_p.get("decision", "fail")
+                if new_dec == "pass":
+                    st.success(f"✅ Revised: {new_result_p.get('decision_reason', '')}")
+                elif new_dec == "needs_improvement":
+                    st.warning(f"⚠️ Revised: {new_result_p.get('decision_reason', '')}")
+                else:
+                    st.error(f"❌ Revised: {new_result_p.get('decision_reason', '')}")
 
     # ── TAB 2: FEEDBACK HISTORY ────────────────────────────────────────────
     with tab_history:
@@ -942,10 +1171,39 @@ def creator_page():
             "and reviewer decisions — saved and accessible anytime."
         )
 
-        all_subs = db.get_all_submissions()
+        # Improvement 1: creators see only their own submissions
+        auth_user = st.session_state.get("auth_user")
+        if auth_user and auth_user.get("role") == "creator":
+            all_subs = db.get_submissions_by_creator(auth_user["username"])
+        else:
+            all_subs = db.get_all_submissions()
         if not all_subs:
             st.info("No submissions yet. Submit your first content! ☝️")
         else:
+            # Clear history button
+            clear_col, _ = st.columns([1, 3])
+            with clear_col:
+                if st.button("🗑️ Clear My History", key="clear_history_btn"):
+                    st.session_state["confirm_clear"] = True
+            if st.session_state.get("confirm_clear"):
+                st.warning("⚠️ This will permanently delete **all** submission history. Are you sure?")
+                ca, cb = st.columns(2)
+                with ca:
+                    if st.button("✅ Yes, Delete All", key="confirm_clear_yes", type="primary"):
+                        db.delete_all_submissions()
+                        # Clear cached result so the submit panel resets too
+                        for k in ["last_result","last_submission_id","last_post_text",
+                                  "last_creator_name","last_image_path","last_campaign_objective",
+                                  "review_sent"]:
+                            st.session_state.pop(k, None)
+                        st.session_state["confirm_clear"] = False
+                        st.success("✅ History cleared.")
+                        st.rerun()
+                with cb:
+                    if st.button("❌ Cancel", key="confirm_clear_no"):
+                        st.session_state["confirm_clear"] = False
+                        st.rerun()
+            st.markdown("---")
             for sub in all_subs[:20]:
                 _render_history_card(sub, role="creator")
 
@@ -954,6 +1212,50 @@ def creator_page():
 # ✅ REVIEWER PAGE
 # ============================================================================
 
+def _render_approved_post_card(sub):
+    """Render a card for an approved post in the Approved Posts section."""
+    latest_eval = db.get_latest_evaluation(sub["id"])
+    score_txt = f"{latest_eval['overall_score']}/100" if latest_eval else "N/A"
+    reviews = db.get_reviews_for_submission(sub["id"])
+    approved_review = next((r for r in reviews if r["decision"] == "approved"), None)
+
+    with st.expander(
+        f"✅ #{sub['id']} — {sub.get('creator_name','?')} — Score: {score_txt} — "
+        f"{sub['created_at'][:16]}",
+        expanded=False,
+    ):
+        h1, h2 = st.columns([3, 1])
+        with h1:
+            st.markdown(f"**👤 Creator:** {sub.get('creator_name','?')}")
+            st.markdown(f"**🎯 Objective:** {sub.get('campaign_objective','N/A').replace('_',' ').title()}")
+            if approved_review:
+                st.markdown(
+                    f"**✅ Approved by:** {approved_review.get('reviewer_name','?')} "
+                    f"on {approved_review['reviewed_at'][:16]}"
+                )
+        with h2:
+            if latest_eval:
+                sc = latest_eval["overall_score"]
+                cls = score_class(sc)
+                st.markdown(
+                    f'<div class="score-gauge">'
+                    f'<div style="color:#64748b;font-size:0.78rem;font-weight:600;margin-bottom:0.3rem;">AI Score</div>'
+                    f'<div class="score-number {cls}" style="font-size:2rem;">{sc}</div>'
+                    f'<div style="color:#94a3b8;font-size:0.8rem;">/100</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+        st.markdown("---")
+        if sub.get("text_content"):
+            st.markdown("**📝 Approved Post Text:**")
+            st.markdown(
+                f'<div class="bg-card" style="white-space:pre-wrap;">{sub["text_content"]}</div>',
+                unsafe_allow_html=True,
+            )
+        if sub.get("image_path") and os.path.exists(sub["image_path"]):
+            st.image(sub["image_path"], caption="Post Image", width=400)
+
+
 def reviewer_page():
     render_header(
         "Content Reviewer",
@@ -961,96 +1263,112 @@ def reviewer_page():
         "✅",
     )
 
-    reviewer_name = st.text_input("Your Name (Reviewer)", value="Manager", key="reviewer_name_input")
-    st.markdown("---")
+    reviewer_name_val = (
+        st.session_state.auth_user["username"]
+        if st.session_state.get("auth_user") else "Reviewer"
+    )
+    reviewer_name = st.text_input("Your Name (Reviewer)", value=reviewer_name_val, key="reviewer_name_input")
 
-    reviewable = db.get_reviewable_submissions()
+    # ── Tabs: Pending Review | Approved Posts ─────────────────────────────
+    tab_pending, tab_approved = st.tabs(["📋 Pending Review", "✅ Approved Posts"])
 
-    if not reviewable:
-        st.info(
-            f"📭 No content is waiting for review right now.\n\n"
-            f"Posts appear here when creators submit content that passes AI evaluation "
-            f"(score ≥ {scoring.PASS_THRESHOLD}, no critical issues)."
-        )
-        return
+    # ── TAB 1: PENDING REVIEW ─────────────────────────────────────────────
+    with tab_pending:
+        st.markdown("---")
+        reviewable = db.get_reviewable_submissions()
 
-    st.markdown(f"### 📋 {len(reviewable)} Post(s) Awaiting Review")
+        if not reviewable:
+            st.info(
+                f"📭 No content is waiting for review right now.\n\n"
+                f"Posts appear here when creators submit content that passes AI evaluation "
+                f"(score ≥ {scoring.PASS_THRESHOLD}, no critical issues)."
+            )
+        else:
+            st.markdown(f"### 📋 {len(reviewable)} Post(s) Awaiting Review")
+            for sub in reviewable:
+                with st.expander(
+                    f"📄 #{sub['id']} — Score: {sub['overall_score']}/100 — {sub['created_at'][:16]}",
+                    expanded=True,
+                ):
+                    col1, col2 = st.columns([2, 1])
+                    with col1:
+                        st.markdown(f"**Creator:** {sub.get('creator_name', 'Unknown')}")
+                        st.markdown(f"**Objective:** {sub.get('campaign_objective', 'N/A')}")
+                        if sub.get("text_content"):
+                            st.markdown("**Post Text:**")
+                            st.text(sub["text_content"])
+                        if sub.get("image_path") and os.path.exists(sub["image_path"]):
+                            st.image(sub["image_path"], caption="Post Image", width=300)
 
-    for sub in reviewable:
-        with st.expander(
-            f"📄 #{sub['id']} — Score: {sub['overall_score']}/100 — {sub['created_at'][:16]}",
-            expanded=True,
-        ):
-            col1, col2 = st.columns([2, 1])
-            with col1:
-                st.markdown(f"**Creator:** {sub.get('creator_name', 'Unknown')}")
-                st.markdown(f"**Objective:** {sub.get('campaign_objective', 'N/A')}")
-                if sub.get("text_content"):
-                    st.markdown("**Post Text:**")
-                    st.text(sub["text_content"])
-                if sub.get("image_path") and os.path.exists(sub["image_path"]):
-                    st.image(sub["image_path"], caption="Post Image", width=300)
+                    with col2:
+                        sc = score_class(sub["overall_score"])
+                        st.markdown(
+                            f'<div class="score-gauge">'
+                            f'<div style="color:#64748b;font-size:0.78rem;font-weight:600;'
+                            f'margin-bottom:0.4rem;">AI Score</div>'
+                            f'<div class="score-number {sc}">{sub["overall_score"]}</div>'
+                            f'<div style="color:#94a3b8;font-size:0.82rem;">/100</div>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+                        st.metric(
+                            "Critical Issues",
+                            "None ✅" if not sub.get("has_critical_issues") else "Yes ❌",
+                        )
 
-            with col2:
-                sc = score_class(sub["overall_score"])
-                st.markdown(
-                    f'<div class="score-gauge">'
-                    f'<div style="color:#64748b;font-size:0.78rem;font-weight:600;'
-                    f'margin-bottom:0.4rem;">AI Score</div>'
-                    f'<div class="score-number {sc}">{sub["overall_score"]}</div>'
-                    f'<div style="color:#94a3b8;font-size:0.82rem;">/100</div>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-                st.metric(
-                    "Critical Issues",
-                    "None ✅" if not sub.get("has_critical_issues") else "Yes ❌",
-                )
+                    latest_eval = db.get_latest_evaluation(sub["id"])
+                    if latest_eval:
+                        st.markdown("**Category Scores:**")
+                        cats = ["factual_accuracy","regulatory_compliance","brand_identity",
+                                "visual_consistency","campaign_effectiveness","accessibility","overall_design"]
+                        cols = st.columns(4)
+                        for i, cat in enumerate(cats):
+                            s = latest_eval.get(cat, 0)
+                            with cols[i % 4]:
+                                st.metric(cat.replace("_"," ").title(), f"{scoring.get_score_color(s)} {s}")
 
-            # Category breakdown
-            latest_eval = db.get_latest_evaluation(sub["id"])
-            if latest_eval:
-                st.markdown("**Category Scores:**")
-                cats = ["factual_accuracy","regulatory_compliance","brand_identity",
-                        "visual_consistency","campaign_effectiveness","accessibility","overall_design"]
-                cols = st.columns(4)
-                for i, cat in enumerate(cats):
-                    s = latest_eval.get(cat, 0)
-                    with cols[i % 4]:
-                        st.metric(cat.replace("_"," ").title(), f"{scoring.get_score_color(s)} {s}")
+                        if latest_eval.get("feedback"):
+                            fb_data = latest_eval["feedback"]
+                            cat_fb = fb_data.get("category_feedback", {}) if isinstance(fb_data, dict) else {}
+                            if cat_fb:
+                                with st.expander("💬 View Full AI Feedback"):
+                                    for cat, text in cat_fb.items():
+                                        st.markdown(f"**{cat.replace('_',' ').title()}:** {text}")
 
-                # Show full feedback in expander
-                if latest_eval.get("feedback"):
-                    fb_data = latest_eval["feedback"]
-                    cat_fb = fb_data.get("category_feedback", {}) if isinstance(fb_data, dict) else {}
-                    if cat_fb:
-                        with st.expander("💬 View Full AI Feedback"):
-                            for cat, text in cat_fb.items():
-                                st.markdown(f"**{cat.replace('_',' ').title()}:** {text}")
+                    st.markdown("---")
+                    rc1, rc2, rc3 = st.columns(3)
+                    with rc1:
+                        if st.button("✅ Approve", key=f"approve_{sub['id']}", type="primary"):
+                            eval_id = sub.get("eval_id", latest_eval["id"] if latest_eval else 0)
+                            db.save_review(sub["id"], eval_id, reviewer_name, "approved", "Approved by reviewer.")
+                            st.success("✅ Post approved and moved to Approved Posts!")
+                            st.rerun()
+                    with rc2:
+                        if st.button("❌ Reject", key=f"reject_{sub['id']}"):
+                            reject_reason = st.text_input("Reason for rejection", key=f"rr_{sub['id']}")
+                            eval_id = sub.get("eval_id", latest_eval["id"] if latest_eval else 0)
+                            db.save_review(sub["id"], eval_id, reviewer_name, "rejected",
+                                           reject_reason or "Rejected by reviewer.")
+                            st.error("❌ Post rejected.")
+                            st.rerun()
+                    with rc3:
+                        if st.button("🔄 Request Revision", key=f"revise_{sub['id']}"):
+                            eval_id = sub.get("eval_id", latest_eval["id"] if latest_eval else 0)
+                            db.save_review(sub["id"], eval_id, reviewer_name,
+                                           "revision_needed", "Please revise and resubmit.")
+                            st.warning("🔄 Revision requested.")
+                            st.rerun()
 
-            st.markdown("---")
-            rc1, rc2, rc3 = st.columns(3)
-            with rc1:
-                if st.button("✅ Approve", key=f"approve_{sub['id']}", type="primary"):
-                    eval_id = sub.get("eval_id", latest_eval["id"] if latest_eval else 0)
-                    db.save_review(sub["id"], eval_id, reviewer_name, "approved", "Approved by reviewer.")
-                    st.success("✅ Post approved!")
-                    st.rerun()
-            with rc2:
-                if st.button("❌ Reject", key=f"reject_{sub['id']}"):
-                    reject_reason = st.text_input("Reason for rejection", key=f"rr_{sub['id']}")
-                    eval_id = sub.get("eval_id", latest_eval["id"] if latest_eval else 0)
-                    db.save_review(sub["id"], eval_id, reviewer_name, "rejected",
-                                   reject_reason or "Rejected by reviewer.")
-                    st.error("❌ Post rejected.")
-                    st.rerun()
-            with rc3:
-                if st.button("🔄 Request Revision", key=f"revise_{sub['id']}"):
-                    eval_id = sub.get("eval_id", latest_eval["id"] if latest_eval else 0)
-                    db.save_review(sub["id"], eval_id, reviewer_name,
-                                   "revision_needed", "Please revise and resubmit.")
-                    st.warning("🔄 Revision requested.")
-                    st.rerun()
+    # ── TAB 2: APPROVED POSTS ─────────────────────────────────────────────
+    with tab_approved:
+        st.markdown("---")
+        approved_posts = db.get_approved_submissions()
+        if not approved_posts:
+            st.info("📭 No approved posts yet. Approve posts from the Pending Review tab.")
+        else:
+            st.markdown(f"### ✅ {len(approved_posts)} Approved Post(s)")
+            for sub in approved_posts:
+                _render_approved_post_card(sub)
 
 
 # ============================================================================
@@ -1166,8 +1484,13 @@ def admin_page():
                         st.caption(doc["content_preview"][:200] + "…")
                 with c2:
                     if st.button("🗑️", key=f"del_doc_{doc['id']}"):
+                        # Delete chunks from ChromaDB first, then soft-delete in SQLite
+                        removed = ingest.delete_chunks_by_filename(doc["filename"])
                         db.delete_document(doc["id"])
-                        st.warning(f"Document '{doc['filename']}' deactivated.")
+                        st.warning(
+                            f"🗑️ '{doc['filename']}' removed — "
+                            f"{removed} chunk(s) deleted from knowledge base."
+                        )
                         st.rerun()
         else:
             st.info("📭 No documents uploaded yet. Use the tabs above to add guidelines!")
@@ -1188,7 +1511,7 @@ def admin_page():
 
 
 # ============================================================================
-# 📊 DASHBOARD
+# 📊 DASHBOARD (Improvement 3 — Analytics with charts)
 # ============================================================================
 
 def dashboard_page():
@@ -1198,9 +1521,11 @@ def dashboard_page():
         "📊",
     )
 
+    import pandas as pd
+
     stats = db.get_dashboard_stats()
 
-    # Top metrics
+    # ── Top KPI metrics ─────────────────────────────────────────────────
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1: st.metric("📝 Total", stats["total_submissions"])
     with c2: st.metric("✅ Approved", stats.get("approved_count", 0))
@@ -1208,7 +1533,7 @@ def dashboard_page():
     with c4: st.metric("⏳ Pending", stats.get("pending_count", 0))
     with c5: st.metric("📊 Avg Score", stats.get("average_score", 0))
 
-    # Compliance bar
+    # ── Compliance bar ───────────────────────────────────────────────────
     total = stats["total_submissions"]
     if total > 0:
         st.markdown("---")
@@ -1217,7 +1542,76 @@ def dashboard_page():
         st.markdown(f"### 🏆 Approval Rate — **{rate}%**")
         st.progress(rate / 100)
 
-    # KB stats
+    st.markdown("---")
+
+    # ── CHART ROW 1: Score Distribution Histogram + Category Radar ──────
+    ch1, ch2 = st.columns(2)
+
+    with ch1:
+        st.markdown("#### 📊 Score Distribution Histogram")
+        scores_list = db.get_score_distribution()
+        if scores_list:
+            # Build bucket counts 0-9,10-19,...,90-100
+            buckets = [f"{i*10}-{i*10+9}" for i in range(10)] + ["100"]
+            counts_map = {b: 0 for b in buckets}
+            for s in scores_list:
+                if s >= 100:
+                    counts_map["100"] += 1
+                else:
+                    idx = int(s // 10)
+                    counts_map[buckets[idx]] += 1
+            df_hist = pd.DataFrame({"Score Range": list(counts_map.keys()),
+                                     "Count": list(counts_map.values())})
+            # Colour bars by range
+            def _bar_colour(label):
+                lo = int(label.split("-")[0]) if "-" in label else 100
+                if lo >= 85: return "#059669"
+                if lo >= 60: return "#d97706"
+                return "#dc2626"
+            df_hist["Color"] = df_hist["Score Range"].apply(_bar_colour)
+            st.bar_chart(df_hist.set_index("Score Range")["Count"])
+        else:
+            st.info("No evaluation data yet for histogram.")
+
+    with ch2:
+        st.markdown("#### 🕸️ Category Radar Chart")
+        cat_avgs = db.get_category_averages()
+        if cat_avgs:
+            labels = [k.replace("_", " ").title() for k in cat_avgs.keys()]
+            values = [round(v or 0, 1) for v in cat_avgs.values()]
+            df_radar = pd.DataFrame({"Category": labels, "Avg Score": values})
+            st.bar_chart(df_radar.set_index("Category")["Avg Score"])
+            st.caption("Radar chart (shown as bar chart for compatibility). Higher = better.")
+        else:
+            st.info("No evaluation data yet for radar chart.")
+
+    st.markdown("---")
+
+    # ── CHART ROW 2: Approval Trend + Most Common Failure Categories ────
+    ch3, ch4 = st.columns(2)
+
+    with ch3:
+        st.markdown("#### 📈 Approval Trend Over Time")
+        trend_data = db.get_approval_trend()
+        if trend_data:
+            df_trend = pd.DataFrame(trend_data)
+            pivot = df_trend.pivot_table(index="day", columns="decision",
+                                          values="cnt", aggfunc="sum").fillna(0)
+            st.line_chart(pivot)
+        else:
+            st.info("No review data yet for trend chart.")
+
+    with ch4:
+        st.markdown("#### ⚠️ Most Common Failure Categories")
+        failures = db.get_common_failure_categories()
+        if failures:
+            df_fail = pd.DataFrame(failures, columns=["Category", "Avg Score"])
+            st.bar_chart(df_fail.set_index("Category")["Avg Score"])
+            st.caption("Categories with average score < 70 — sorted by weakest first.")
+        else:
+            st.success("🎉 All categories are averaging above 70! No common failures.")
+
+    # ── KB stats ─────────────────────────────────────────────────────────
     st.markdown("---")
     st.markdown("### 📚 Knowledge Base")
     kc1, kc2 = st.columns(2)
@@ -1226,7 +1620,7 @@ def dashboard_page():
         kb_stats = ingest.get_collection_stats()
         st.metric("Guideline Chunks", kb_stats["total_chunks"])
 
-    # Recent activity
+    # ── Recent activity ───────────────────────────────────────────────────
     st.markdown("---")
     st.markdown("### 📜 Recent Submissions")
     all_subs = db.get_all_submissions()
