@@ -17,8 +17,6 @@ Built with **Streamlit**, **ChromaDB**, **SQLite** and the **Groq API**. It is t
 7. [Data model](#data-model)
 8. [Project structure](#project-structure)
 9. [Troubleshooting](#troubleshooting)
-10. [Known issues](#known-issues)
-11. [Project planner / roadmap](#project-planner--roadmap)
 
 ---
 
@@ -171,7 +169,7 @@ Try a deliberately bad draft to see the guard-rails in action, e.g. *"Our SuperW
 
 **Feedback History**
 - Creators see only their own submissions (latest 20), as expandable cards with status pill, score, category grid, critical flags, full feedback, suggestions, and the reviewer decision history.
-- *Clear History* deletes submissions, evaluations and reviews (with a confirmation step) — see [Known issues](#known-issues).
+- *Clear History* deletes submissions, evaluations and reviews (with a confirmation step).
 
 ### ✅ Reviewer workspace
 
@@ -201,7 +199,7 @@ Temperature is `0.1` for consistent scoring.
 
 ### 📊 Analytics
 
-`db.py` includes analytics queries (score distribution, category averages, approval trend, common failure categories), and `app.py` contains a full `dashboard_page()` with KPIs, approval-rate bar, histogram, category chart, trend line and recent-submissions list. **It is not yet reachable from any role** — see [Known issues](#known-issues) and the [planner](#project-planner--roadmap).
+`db.py` includes analytics queries (score distribution, category averages, approval trend, common failure categories), and `app.py` contains a full `dashboard_page()` with KPIs, approval-rate bar, category chart, trend line and recent-submissions list. **It is not yet reachable from any role**.
 
 ---
 
@@ -263,7 +261,6 @@ brandgaurd2/
 ├── requirements.txt    # Python dependencies
 ├── data/
 │   ├── logo.jpg        # Brand logo used in the UI
-│   ├── requirments.txt # Old, minimal dependency list (superseded; see Known issues)
 │   └── .env            # (you create) GROQ_API_KEY — git-ignored
 ├── .streamlit/config.toml   # Light theme
 └── .gitignore          # ignores chroma_data/, temp_uploads/, brandguard.db, .env files
@@ -286,78 +283,6 @@ Generated at runtime (all git-ignored): `brandguard.db`, `chroma_data/`, `temp_u
 | PDF ingests as "empty" | The PDF is probably scanned images (no extractable text). Use a text-based PDF or paste the text. |
 | First ingest is slow | ChromaDB is downloading its default embedding model; it is cached afterwards. |
 | Want a clean slate | Stop the app and delete `brandguard.db` and/or `chroma_data/`. |
-
----
-
-## Known issues
-
-Found while reading the code for this README (none were changed):
-
-| # | Area | Issue |
-|---|---|---|
-| 1 | Dependencies | `requirements.txt` omits `groq` (required) and includes unused packages (`google-genai`, `google`, `kubernetes`, …). |
-| 2 | Dashboard | `dashboard_page()` exists but no role lists a "Dashboard" page, so it is unreachable. |
-| 3 | Security | Anyone can self-register as **admin** or **reviewer** from the login page. |
-| 4 | Data | "Clear My History" calls `delete_all_submissions()`, which wipes **every** user's submissions, not just the caller's. |
-| 5 | Reviewer | The **Reject** button renders a reason text box *after* the click and saves immediately, so the typed reason is never captured. |
-| 6 | Scoring | Keyword matching on feedback text can false-positive (e.g. feedback saying "no missing disclaimer" contains the phrase *missing disclaimer*). |
-| 7 | Code | `ingest.py` defines `read_pdf_file` twice; the second definition overrides the first, so the `PyPDF2` fallback is never used. |
-| 8 | Comments | Several comments/docstrings still mention an 85-point pass threshold; the actual `PASS_THRESHOLD` is 70. |
-| 9 | Dead code | `splash_page()` is defined but never shown; `data/requirments.txt` is a stale, misspelled duplicate. |
-| 10 | Ingestion | Re-uploading the same filename adds duplicate chunks (IDs include a timestamp), and deleting by filename removes all versions. |
-| 11 | Uploads | Uploaded images are stored under their original filename in `temp_uploads/`, so same-named files overwrite each other. |
-| 12 | Tests | No automated tests. |
-
----
-
-## Project planner / roadmap
-
-Priorities: 🔴 do first · 🟠 next · 🟢 nice to have. Effort: S (<½ day), M (1–2 days), L (3+ days).
-
-### Phase 0 — Stabilise (week 1)
-
-- [ ] 🔴 **S** Fix `requirements.txt`: add `groq`, remove unused packages, make `pysqlite3-binary` Linux-only
-- [ ] 🔴 **S** Delete `data/requirments.txt`
-- [ ] 🔴 **M** Restrict self-registration: only `creator` is self-service; admins create reviewer/admin accounts (or require an invite code)
-- [ ] 🔴 **S** Make "Clear My History" scoped to the signed-in creator
-- [ ] 🔴 **S** Fix the Reject flow so the reason is captured before saving
-- [ ] 🟠 **S** Remove the duplicate `read_pdf_file`; keep the `pypdf` → `PyPDF2` fallback
-- [ ] 🟠 **S** Update the 85 → 70 threshold comments
-
-### Phase 1 — Complete the product (weeks 2–3)
-
-- [ ] 🔴 **S** Surface the Dashboard (give Admin — and optionally Reviewer — a second page)
-- [ ] 🟠 **M** Replace keyword-based critical detection with structured, negation-aware checks (or rely on the LLM's `critical_flags` plus a curated phrase list)
-- [ ] 🟠 **M** Unique image filenames (UUID) and clean-up of `temp_uploads/`
-- [ ] 🟠 **M** Document versioning: re-upload bumps `version` and replaces old chunks
-- [ ] 🟠 **S** Show which guideline chunks were retrieved on the results screen (`guideline_sources` is already returned)
-- [ ] 🟢 **S** Real radar chart on the dashboard (currently a bar chart)
-
-### Phase 2 — Quality & trust (weeks 4–5)
-
-- [ ] 🔴 **M** Unit tests for `scoring.py`, `chunk_text`, `_parse_json_response`, and DB functions
-- [ ] 🟠 **M** Mock-LLM integration test for `evaluate_post`
-- [ ] 🟠 **M** Golden set of good/bad sample posts to track scoring drift across models
-- [ ] 🟠 **S** Password policy and login rate-limiting; session timeout
-- [ ] 🟢 **S** Structured logging instead of `print`
-
-### Phase 3 — Scale & collaboration (weeks 6+)
-
-- [ ] 🟠 **L** Move from SQLite to Postgres; hosted vector store for multi-user deployments
-- [ ] 🟠 **M** Email / Slack notification when a post is sent for review or decided
-- [ ] 🟠 **L** Multi-brand / multi-tenant knowledge bases
-- [ ] 🟢 **M** Export reports (PDF/CSV) and an audit trail of reviewer decisions
-- [ ] 🟢 **M** Multi-language content support (Hindi and other Indian languages)
-- [ ] 🟢 **L** Direct publishing hooks to social platforms after approval
-- [ ] 🟢 **S** Dockerfile and CI (lint + tests) for one-command deployment
-
-### Operating checklist (every release)
-
-- [ ] `pip install -r requirements.txt` works in a clean virtualenv
-- [ ] App starts with `streamlit run app.py`
-- [ ] Register → ingest → submit → review flow passes end to end
-- [ ] A deliberately non-compliant post is capped at ≤ 49 and cannot be sent for review
-- [ ] No secrets committed (`.env`, API keys)
 
 ---
 
