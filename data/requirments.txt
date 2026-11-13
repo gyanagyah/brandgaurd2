@@ -1,5 +1,5 @@
 streamlit
-google-genai
+groq>=0.11.0
 chromadb
 python-dotenv
 PyPDF2

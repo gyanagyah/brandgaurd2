@@ -64,6 +64,16 @@ if not GEMINI_API_KEY:
 if not GEMINI_API_KEY:
     print("❌ GEMINI_API_KEY not found! Check data/.env or Streamlit Secrets.")
 
+import os
+import streamlit as st
+from dotenv import load_dotenv
+from google import genai
+
+load_dotenv()
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY")
+client = genai.Client(api_key=GEMINI_API_KEY)
+
 # Gemini client initialize karo
 client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -240,7 +250,7 @@ def evaluate_post(text_content, campaign_objective, image_path=None,
         
         # Gemini API call karo
         response = client.models.generate_content(
-            model="gemini-3.8-flash",   # Fast aur capable model
+            model="gemini-3.6-flash",   # Fast aur capable model
             contents=contents,
             config=types.GenerateContentConfig(
                 temperature=0.2,         # Low temperature = more consistent/factual output
