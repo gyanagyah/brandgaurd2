@@ -77,8 +77,6 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-> ⚠️ The `requirements.txt` committed in the repo is **missing `groq`**, which `evaluate.py` imports at start-up. Until it is updated, also run:
->
 > ```bash
 > pip install "groq>=0.11.0"
 > ```
